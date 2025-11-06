@@ -1,0 +1,357 @@
+// Quotation — Add Item dialog
+// - Filter by Design/Material/W/D/H/T with ±0.2% tolerance
+// - Inline results list (paged) below a *Data* search field (no Link dropdown)
+// - Click a result -> qty popup -> add row
+// - Static dialogs (no outside click close)
+// - Bottom-right toast on add
+
+frappe.ui.form.on('Quotation', {
+    custom_add_item(frm) {
+
+        ensureToastBottomRight();
+
+        // --- Main dialog ---
+        const dialog = new frappe.ui.Dialog({
+            title: 'Add Item Details',
+            fields: [
+                { label: 'Materials', fieldname: 'custom_materials', fieldtype: 'Link', options: 'Material' },
+                { fieldtype: 'Column Break' },
+                { label: 'Designs', fieldname: 'custom_designs', fieldtype: 'Link', options: 'Design' },
+                { fieldtype: 'Column Break' },
+
+                { fieldtype: 'Section Break' },
+                { label: 'W', fieldname: 'custom_w', fieldtype: 'Float' },
+                { fieldtype: 'Column Break' },
+                { label: 'D', fieldname: 'custom_d', fieldtype: 'Float' },
+                { fieldtype: 'Column Break' },
+                { label: 'H', fieldname: 'custom_h', fieldtype: 'Float' },
+                { fieldtype: 'Column Break' },
+                { label: 'T', fieldname: 'custom_t', fieldtype: 'Float' },
+
+                { label: 'Customer Product Code', fieldname: 'customer_product_code', fieldtype: 'Int', hidden: true },
+
+                { fieldtype: 'Section Break' },
+
+                // 🔎 Data field only (no dropdown). Used to filter the inline list below.
+                { label: 'Item Code (filtered)', fieldname: 'filtered_item_code', fieldtype: 'Data', description: 'Type to search item code/name/description' },
+
+                // Inline results container
+                { fieldtype: 'HTML', fieldname: 'filtered_results_html' }
+            ],
+
+            // ❌ Remove the primary button
+            primary_action_label: '',
+            primary_action() {}
+        });
+
+        // make main dialog static
+        const $w = dialog.$wrapper;
+        if (typeof $w.modal === 'function') {
+            $w.modal({ backdrop: 'static', keyboard: false });
+        }
+        dialog.show();
+
+        // safety: hide any primary button if framework renders one
+        dialog.$wrapper.find('.modal-footer .btn-primary').hide();
+
+        // ---------- Filters (±0.2% tolerance) ----------
+        let searchText = ''; // from the Data field
+
+        function build_filters_and_search() {
+            const v = dialog.get_values(true) || {};
+            const design = v.custom_designs;
+            const material = v.custom_materials;
+            const customer_code = v.customer_product_code;
+
+            const toNum = (x) => (x === 0 ? 0 : (x === '' || x === undefined || x === null ? null : Number(x)));
+            const w = toNum(v.custom_w);
+            const d = toNum(v.custom_d);
+            const h = toNum(v.custom_h);
+            const t = toNum(v.custom_t);
+
+            const all_dims = (w !== null && d !== null && h !== null && t !== null);
+            const any_basic = !!(design || material || customer_code || w !== null || d !== null || h !== null || t !== null);
+
+            let filters = [['Item', 'disabled', '!=', 1]];
+            let or_filters = [];
+
+            const addTol = (fieldname, val) => {
+                if (val === null || Number.isNaN(val)) return;
+                const vnum = Number(val);
+                if (vnum === 0) { filters.push(['Item', fieldname, '=', 0]); return; }
+                const tol = Math.abs(vnum) * 0.002; // 0.2%
+                filters.push(['Item', fieldname, '>=', vnum - tol]);
+                filters.push(['Item', fieldname, '<=', vnum + tol]);
+            };
+
+            if (all_dims) {
+                addTol('custom_w', w);
+                addTol('custom_d', d);
+                addTol('custom_h', h);
+                addTol('custom_t', t);
+                if (design)   filters.push(['Item', 'custom_design', '=', design]);
+                if (material) filters.push(['Item', 'custom_material', '=', material]);
+                if (customer_code) filters.push(['Item', 'customer_product_code', '=', customer_code]);
+            } else if (any_basic) {
+                if (design)   filters.push(['Item', 'custom_design', '=', design]);
+                if (material) filters.push(['Item', 'custom_material', '=', material]);
+                addTol('custom_w', w);
+                addTol('custom_d', d);
+                addTol('custom_h', h);
+                addTol('custom_t', t);
+                if (customer_code) filters.push(['Item', 'customer_product_code', '=', customer_code]);
+            } else {
+                // no extra constraints → show all items
+            }
+
+            const q = (searchText || '').trim();
+            if (q) {
+                const like = `%${q}%`;
+                or_filters = [
+                    ['Item', 'item_code', 'like', like],
+                    ['Item', 'item_name', 'like', like],
+                    ['Item', 'description', 'like', like],
+                ];
+            }
+            return { filters, or_filters };
+        }
+
+        // ---------- Inline list logic ----------
+        let page_start = 0;
+        const page_len = 20;
+        let loading = false;
+
+        function render_list(items, append=false, has_more=false) {
+            const $wrap = dialog.fields_dict.filtered_results_html.$wrapper;
+            if (!append) $wrap.empty();
+
+            if (!append && (!items || !items.length)) {
+                $wrap.html('<div style="color:#888;margin-top:6px;">No items found.</div>');
+                return;
+            }
+
+            const $list = append ? $wrap.find('.inline-item-list') : $('<div class="inline-item-list" style="max-height:260px; overflow:auto; margin-top:8px; border:1px solid #eee; border-radius:6px;"></div>');
+            if (!append) $wrap.append($list);
+
+            items.forEach(r => {
+                const code = r.item_code || r.name;
+                const name = r.item_name || '';
+                const desc = (r.description || '').trim();
+
+                const $row = $(`
+                    <div class="inline-item-row" style="padding:10px 12px; display:flex; gap:12px; align-items:flex-start; cursor:pointer; border-bottom:1px solid #f0f0f0;">
+                        <div style="font-weight:600; min-width:180px;">${frappe.utils.escape_html(code)}</div>
+                        <div style="flex:1;">
+                            <div style="font-size:12px;color:#444;">${frappe.utils.escape_html(name)}</div>
+                            ${desc ? `<div style="font-size:11px;color:#777; margin-top:2px;">${frappe.utils.escape_html(desc)}</div>` : ''}
+                        </div>
+                        <div style="font-size:12px; color:#0b69ff;">Select</div>
+                    </div>
+                `);
+                $row.on('click', () => {
+                    open_qty_and_add(code);
+                });
+                $list.append($row);
+            });
+
+            $wrap.find('.inline-more').remove();
+            if (has_more) {
+                const $more = $('<div class="inline-more" style="margin-top:8px;"><button class="btn btn-sm btn-default">More</button></div>');
+                $more.find('button').on('click', () => fetch_and_render(true));
+                $wrap.append($more);
+            }
+        }
+
+        function fetch_and_render(append=false) {
+            if (loading) return;
+            loading = true;
+
+            const start = append ? page_start : 0;
+            if (!append) page_start = 0;
+
+            const { filters, or_filters } = build_filters_and_search();
+
+            frappe.call({
+                method: 'frappe.client.get_list',
+                args: {
+                    doctype: 'Item',
+                    fields: ['name', 'item_code', 'item_name', 'description'],
+                    filters,
+                    or_filters,
+                    limit_start: start,
+                    limit_page_length: page_len + 1
+                },
+                callback: (r) => {
+                    const rows = (r && r.message) || [];
+                    const has_more = rows.length > page_len;
+                    const slice = rows.slice(0, page_len);
+
+                    if (append) page_start += slice.length;
+                    else page_start = slice.length;
+
+                    render_list(slice, append, has_more);
+                },
+                always: () => { loading = false; }
+            });
+        }
+
+        // Initial fetch
+        fetch_and_render(false);
+
+        // ✅ Re-fetch on ANY filter change
+        (function bindFilterWatchers() {
+            const names = [
+                'custom_designs','custom_materials',
+                'custom_w','custom_d','custom_h','custom_t',
+                'customer_product_code'
+            ];
+            function bind(fieldname) {
+                const ctrl = dialog.fields_dict[fieldname];
+                if (!ctrl || !ctrl.$input) return;
+                const handler = () => { page_start = 0; fetch_and_render(false); };
+                ctrl.$input.on('input change blur', handler);
+                ctrl.$input.on('awesomplete-selectcomplete awesomplete-close', handler);
+                try { ctrl.$input.on('select2:select', handler); } catch (e) {}
+            }
+            names.forEach(bind);
+        })();
+
+        // Search typing (debounced)
+        (function hookSearchTyping(){
+            const f = dialog.fields_dict.filtered_item_code;
+            if (!f || !f.$input) return;
+
+            let t;
+            const onType = () => {
+                clearTimeout(t);
+                t = setTimeout(() => {
+                    searchText = (f.$input.val() || '').trim();
+                    fetch_and_render(false);
+                }, 200);
+            };
+            f.$input.on('input', onType);
+            f.$input.on('change', onType);
+        })();
+
+        // ---------- Qty popup + add ----------
+        function open_qty_and_add(picked) {
+            const qty_dialog = new frappe.ui.Dialog({
+                title: 'Set Quantity',
+                fields: [{ label: 'Quantity', fieldname: 'qty', fieldtype: 'Float', reqd: 1, default: 1 }],
+                primary_action_label: 'Add Item',
+                async primary_action(values) {
+                    const qty = flt(values.qty);
+                    if (!qty || qty <= 0) {
+                        frappe.msgprint(__('Please enter a valid quantity.'));
+                        return;
+                    }
+                    const r = await frappe.db.get_value('Item', picked, ['item_code', 'name']);
+                    const it = r && r.message ? r.message : null;
+                    if (!it) {
+                        frappe.msgprint(__('Unable to fetch Item. Please try again.'));
+                        return;
+                    }
+                    add_item_to_child(
+                        { item_code: it.item_code || it.name, name: it.name },
+                        qty,
+                        dialog.get_values(true) || {}
+                    );
+                    qty_dialog.hide();
+                    dialog.hide();
+                }
+            });
+            const $qw = qty_dialog.$wrapper;
+            if (typeof $qw.modal === 'function') {
+                $qw.modal({ backdrop: 'static', keyboard: false });
+            }
+            qty_dialog.show();
+        }
+
+        // ---------- Add row + toast ----------
+        function add_item_to_child(item, qty, v) {
+            v = v || {};
+            const row = frm.add_child('items');
+
+            frappe.model.set_value(row.doctype, row.name, 'item_code', item.item_code || item.name);
+            frappe.model.set_value(row.doctype, row.name, 'qty', qty);
+
+            frappe.model.set_value(row.doctype, row.name, 'custom_designs', v.custom_designs || '');
+            frappe.model.set_value(row.doctype, row.name, 'custom_design', v.custom_designs || '');
+            frappe.model.set_value(row.doctype, row.name, 'custom_materials', v.custom_materials || '');
+
+            frappe.model.set_value(row.doctype, row.name, 'custom_w', (v.custom_w === 0) ? 0 : (v.custom_w || 0));
+            frappe.model.set_value(row.doctype, row.name, 'custom_d', (v.custom_d === 0) ? 0 : (v.custom_d || 0));
+            frappe.model.set_value(row.doctype, row.name, 'custom_h', (v.custom_h === 0) ? 0 : (v.custom_h || 0));
+            frappe.model.set_value(row.doctype, row.name, 'custom_t', (v.custom_t === 0) ? 0 : (v.custom_t || 0));
+
+            frappe.model.set_value(row.doctype, row.name, 'custom_customer_product_code', v.customer_product_code || '');
+
+            frm.refresh_field('items');
+
+            frappe.show_alert({
+                message: `✅ Added <b>${frappe.utils.escape_html(item.item_code || item.name)}</b> (${qty})`,
+                indicator: 'green'
+            }, 5);
+        }
+    },
+
+    // Footer button (kept)
+    refresh(frm) {
+        function add_button_once() {
+            if (!frm.fields_dict || !frm.fields_dict.items) return;
+            const $wrapper = frm.fields_dict.items.$wrapper;
+            if ($wrapper.find('.btn-add-item-custom').length) return;
+
+            const $footer = $wrapper.find('.grid-footer');
+            if (!$footer.length) return;
+
+            const $afterBtn =
+                $footer.find('.btn').filter(function () {
+                    return $(this).text().trim().toLowerCase() === 'add multiple';
+                }).first().length
+                    ? $footer.find('.btn').filter(function () {
+                        return $(this).text().trim().toLowerCase() === 'add multiple';
+                    }).first()
+                    : $footer.find('.btn').filter(function () {
+                        return $(this).text().trim().toLowerCase() === 'add row';
+                    }).first();
+
+            const $btn = $('<button class="btn btn-default btn-xs btn-add-item-custom" style="margin-left:6px;">Add item</button>');
+            $btn.on('click', function (e) {
+                e.preventDefault();
+                frm.trigger('custom_add_item');
+            });
+
+            if ($afterBtn && $afterBtn.length) $btn.insertAfter($afterBtn);
+            else $footer.append($btn);
+        }
+
+        add_button_once();
+        if (frm.fields_dict.items && frm.fields_dict.items.grid) {
+            const original = frm.fields_dict.items.grid.on_grid_rendered;
+            frm.fields_dict.items.grid.on_grid_rendered = function() {
+                if (typeof original === 'function') original.apply(this, arguments);
+                add_button_once();
+            };
+        }
+        setTimeout(add_button_once, 300);
+    }
+});
+
+// --- helper: bottom-right toasts ---
+function ensureToastBottomRight() {
+    if (document.getElementById('toast-bottom-right-style')) return;
+    const css = `
+    .frappe-toast-container {
+        position: fixed !important;
+        right: 16px !important;
+        left: auto !important;
+        bottom: 16px !important;
+        top: auto !important;
+        z-index: 1061 !important;
+    }`;
+    const style = document.createElement('style');
+    style.id = 'toast-bottom-right-style';
+    style.textContent = css;
+    document.head.appendChild(style);
+}
