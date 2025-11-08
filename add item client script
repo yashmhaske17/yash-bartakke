@@ -55,19 +55,15 @@ frappe.ui.form.on('Quotation', {
 
         // ---------- Filters (±0.2% tolerance) ----------
         let searchText = ''; // from the Data field
+        let createMode = false; // ← when true we don't auto-search on typing; you can write description freely
 
         function set_fields_required(flag) {
-            // Make all relevant fields mandatory/optional
             ['custom_part_type','custom_materials','custom_designs','custom_w','custom_d','custom_h','custom_t','filtered_item_code']
                 .forEach(fn => dialog.set_df_property(fn, 'reqd', flag ? 1 : 0));
         }
+        set_fields_required(false); // normal search mode by default
 
-        // allow free typing by default
-        set_fields_required(false);
-
-        function numFilled(x) {
-            return x !== null && x !== '' && !isNaN(Number(x));
-        }
+        const numFilled = (x) => x !== null && x !== '' && !isNaN(Number(x));
 
         async function create_custom_item_from_dialog() {
             const v = dialog.get_values(true) || {};
@@ -169,7 +165,6 @@ frappe.ui.form.on('Quotation', {
                 if (customer_code) filters.push(['Item', 'customer_product_code', '=', customer_code]);
             }
 
-            // word-by-word OR across item_code, item_name, description
             const q = (searchText || '').trim();
             if (q) {
                 const parts = q.split(/\s+/).filter(Boolean);
@@ -194,8 +189,12 @@ frappe.ui.form.on('Quotation', {
             if (!append) $wrap.empty();
 
             if (!append && (!items || !items.length)) {
-                // Always show the "Create Custom Item" button when no results
+                // ENTER CREATE MODE
+                createMode = true;
                 set_fields_required(true);
+
+                // allow free typing for description in this mode
+                dialog.set_df_property('filtered_item_code', 'placeholder', 'Enter description for the new Custom Item');
 
                 const $empty = $('<div style="color:#888;margin-top:6px;">No items found.</div>');
                 const $btnWrap = $(`
@@ -208,13 +207,14 @@ frappe.ui.form.on('Quotation', {
                 `);
                 $btnWrap.find('.btn-create-custom-item').on('click', create_custom_item_from_dialog);
                 $empty.append($btnWrap);
-
                 $wrap.append($empty);
                 return;
             }
 
-            // We have results → normal search mode (not required)
+            // EXIT CREATE MODE (normal search mode)
+            createMode = false;
             set_fields_required(false);
+            dialog.set_df_property('filtered_item_code', 'placeholder', 'Type to search item code/name/description');
 
             const $list = append ? $wrap.find('.inline-item-list')
                                  : $('<div class="inline-item-list" style="max-height:260px; overflow:auto; margin-top:8px; border:1px solid #eee; border-radius:6px;"></div>');
@@ -311,13 +311,17 @@ frappe.ui.form.on('Quotation', {
             dims.forEach(bindDims);
         })();
 
-        // Search typing (debounced)
+        // Search typing (debounced) — disabled in createMode so you can type description
         (function hookSearchTyping(){
             const f = dialog.fields_dict.filtered_item_code;
             if (!f || !f.$input) return;
 
             let t;
             const onType = () => {
+                if (createMode) { // let the user type freely
+                    searchText = (f.$input.val() || '').trim();
+                    return;
+                }
                 clearTimeout(t);
                 t = setTimeout(() => {
                     searchText = (f.$input.val() || '').trim();
