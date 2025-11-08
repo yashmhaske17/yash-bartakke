@@ -1,16 +1,8 @@
 // Quotation — Add Item dialog
-// - Filter by Design/Material/W/D/H/T with ±0.2% tolerance
-// - Inline results list (paged) below a *Data* search field (no Link dropdown)
-// - Click a result -> qty popup -> add row
-// - Static dialogs (no outside click close)
-// - Bottom-right toast on add
-
 frappe.ui.form.on('Quotation', {
     custom_add_item(frm) {
-
         ensureToastBottomRight();
 
-        // --- Main dialog ---
         const dialog = new frappe.ui.Dialog({
             title: 'Add Item Details',
             fields: [
@@ -20,6 +12,9 @@ frappe.ui.form.on('Quotation', {
                 { fieldtype: 'Column Break' },
                 { label: 'Designs', fieldname: 'custom_designs', fieldtype: 'Link', options: 'Design' },
                 { fieldtype: 'Column Break' },
+
+                // shown only in Custom Item create-mode
+                { label: 'HSN/SAC', fieldname: 'gst_hsn_code', fieldtype: 'Link', options: 'GST HSN Code', hidden: 1 },
 
                 { fieldtype: 'Section Break' },
                 { label: 'W', fieldname: 'custom_w', fieldtype: 'Float' },
@@ -33,35 +28,29 @@ frappe.ui.form.on('Quotation', {
                 { label: 'Customer Product Code', fieldname: 'customer_product_code', fieldtype: 'Int', hidden: true },
 
                 { fieldtype: 'Section Break' },
-
-                // 🔎 Data field only (no dropdown). Used to filter the inline list below.
                 { label: 'Item Code (filtered)', fieldname: 'filtered_item_code', fieldtype: 'Data', description: 'Type to search item code/name/description' },
-
-                // Inline results container
                 { fieldtype: 'HTML', fieldname: 'filtered_results_html' }
             ],
-
             primary_action_label: '',
             primary_action() {}
         });
 
-        // make main dialog static
         const $w = dialog.$wrapper;
-        if (typeof $w.modal === 'function') {
-            $w.modal({ backdrop: 'static', keyboard: false });
-        }
+        if (typeof $w.modal === 'function') $w.modal({ backdrop: 'static', keyboard: false });
         dialog.show();
         dialog.$wrapper.find('.modal-footer .btn-primary').hide();
 
-        // ---------- Filters (±0.2% tolerance) ----------
-        let searchText = ''; // from the Data field
-        let createMode = false; // ← when true we don't auto-search on typing; you can write description freely
+        let searchText = '';
+        let createMode = false;
 
-        function set_fields_required(flag) {
-            ['custom_part_type','custom_materials','custom_designs','custom_w','custom_d','custom_h','custom_t','filtered_item_code']
-                .forEach(fn => dialog.set_df_property(fn, 'reqd', flag ? 1 : 0));
-        }
-        set_fields_required(false); // normal search mode by default
+        const set_fields_required = (flag) => {
+            [
+                'custom_part_type','custom_materials','custom_designs',
+                'custom_w','custom_d','custom_h','custom_t','filtered_item_code','gst_hsn_code'
+            ].forEach(fn => dialog.set_df_property(fn, 'reqd', flag ? 1 : 0));
+        };
+        set_fields_required(false);
+        dialog.set_df_property('gst_hsn_code', 'hidden', 1);
 
         const numFilled = (x) => x !== null && x !== '' && !isNaN(Number(x));
 
@@ -71,6 +60,7 @@ frappe.ui.form.on('Quotation', {
             if (!v.custom_part_type) missing.push('Part Type');
             if (!v.custom_materials) missing.push('Materials');
             if (!v.custom_designs) missing.push('Designs');
+            if (!v.gst_hsn_code) missing.push('HSN/SAC');
             ['custom_w','custom_d','custom_h','custom_t'].forEach(k => { if (!numFilled(v[k])) missing.push(k.replace('custom_','').toUpperCase()); });
             if (!v.filtered_item_code) missing.push('Item Code (filtered)');
 
@@ -101,16 +91,15 @@ frappe.ui.form.on('Quotation', {
                         custom_d: Number(v.custom_d || 0),
                         custom_h: Number(v.custom_h || 0),
                         custom_t: Number(v.custom_t || 0),
+                        gst_hsn_code: v.gst_hsn_code,
                         is_stock_item: 1,
-                        maintain_stock: 1
+                        maintain_stock: 1,
+                        item_group: 'Assembly Item' // default for Custom Item
                     }
                 },
                 callback: (r) => {
                     const doc = r && r.message;
-                    if (!doc) {
-                        frappe.msgprint(__('Failed to create Item.'));
-                        return;
-                    }
+                    if (!doc) return frappe.msgprint(__('Failed to create Item.'));
                     frappe.show_alert({ message: `🆕 Item <b>${frappe.utils.escape_html(doc.name)}</b> created`, indicator: 'green' }, 5);
                     open_qty_and_add(doc.name);
                 }
@@ -140,16 +129,13 @@ frappe.ui.form.on('Quotation', {
                 if (val === null || Number.isNaN(val)) return;
                 const vnum = Number(val);
                 if (vnum === 0) { filters.push(['Item', fieldname, '=', 0]); return; }
-                const tol = Math.abs(vnum) * 0.002; // 0.2%
+                const tol = Math.abs(vnum) * 0.002;
                 filters.push(['Item', fieldname, '>=', vnum - tol]);
                 filters.push(['Item', fieldname, '<=', vnum + tol]);
             };
 
             if (all_dims) {
-                addTol('custom_w', w);
-                addTol('custom_d', d);
-                addTol('custom_h', h);
-                addTol('custom_t', t);
+                addTol('custom_w', w); addTol('custom_d', d); addTol('custom_h', h); addTol('custom_t', t);
                 if (part_type)    filters.push(['Item', 'custom_part_type', '=', part_type]);
                 if (design)       filters.push(['Item', 'custom_design', '=', design]);
                 if (material)     filters.push(['Item', 'custom_material', '=', material]);
@@ -158,10 +144,7 @@ frappe.ui.form.on('Quotation', {
                 if (part_type)    filters.push(['Item', 'custom_part_type', '=', part_type]);
                 if (design)       filters.push(['Item', 'custom_design', '=', design]);
                 if (material)     filters.push(['Item', 'custom_material', '=', material]);
-                addTol('custom_w', w);
-                addTol('custom_d', d);
-                addTol('custom_h', h);
-                addTol('custom_t', t);
+                addTol('custom_w', w); addTol('custom_d', d); addTol('custom_h', h); addTol('custom_t', t);
                 if (customer_code) filters.push(['Item', 'customer_product_code', '=', customer_code]);
             }
 
@@ -179,7 +162,6 @@ frappe.ui.form.on('Quotation', {
             return { filters, or_filters };
         }
 
-        // ---------- Inline list logic ----------
         let page_start = 0;
         const page_len = 20;
         let loading = false;
@@ -188,32 +170,45 @@ frappe.ui.form.on('Quotation', {
             const $wrap = dialog.fields_dict.filtered_results_html.$wrapper;
             if (!append) $wrap.empty();
 
+            // keep typed text while props change
+            const filteredCtrl = dialog.fields_dict.filtered_item_code;
+            const currentTyped = filteredCtrl && filteredCtrl.$input ? filteredCtrl.$input.val() : '';
+
             if (!append && (!items || !items.length)) {
-                // ENTER CREATE MODE
-                createMode = true;
-                set_fields_required(true);
+                const v = dialog.get_values(true) || {};
+                const isCustom = (v.custom_part_type || '').trim() === 'Custom Item';
 
-                // allow free typing for description in this mode
-                dialog.set_df_property('filtered_item_code', 'placeholder', 'Enter description for the new Custom Item');
+                if (isCustom) {
+                    createMode = true;
+                    set_fields_required(true);
+                    dialog.set_df_property('gst_hsn_code', 'hidden', 0);
+                    dialog.set_df_property('filtered_item_code', 'placeholder', 'Enter description for the new Custom Item');
 
-                const $empty = $('<div style="color:#888;margin-top:6px;">No items found.</div>');
-                const $btnWrap = $(`
-                    <div style="margin-top:8px;">
-                        <button class="btn btn-primary btn-sm btn-create-custom-item">Create Custom Item</button>
-                    </div>
-                    <div style="margin-top:6px;font-size:12px;color:#666;">
-                        Enter Part Type (<b>Custom Item</b>), Materials, Designs, W/D/H/T and a description in <i>Item Code (filtered)</i>.
-                    </div>
-                `);
-                $btnWrap.find('.btn-create-custom-item').on('click', create_custom_item_from_dialog);
-                $empty.append($btnWrap);
-                $wrap.append($empty);
+                    const $empty = $('<div style="color:#888;margin-top:6px;">No items found.</div>');
+                    // ⬇️ bottom-right button only (no helper text)
+                    const $btnWrap = $(`
+                        <div style="margin-top:8px; display:flex; justify-content:flex-end;">
+                            <button class="btn btn-primary btn-sm btn-create-custom-item">Create Custom Item</button>
+                        </div>
+                    `);
+                    $btnWrap.find('.btn-create-custom-item').on('click', create_custom_item_from_dialog);
+                    $empty.append($btnWrap);
+                    $wrap.append($empty);
+                } else {
+                    createMode = false;
+                    set_fields_required(false);
+                    dialog.set_df_property('gst_hsn_code', 'hidden', 1);
+                    dialog.set_df_property('filtered_item_code', 'placeholder', 'Type to search item code/name/description');
+                    $wrap.append('<div style="color:#888;margin-top:6px;">No items found.</div>');
+                }
+
+                if (filteredCtrl && filteredCtrl.$input) filteredCtrl.$input.val(currentTyped);
                 return;
             }
 
-            // EXIT CREATE MODE (normal search mode)
             createMode = false;
             set_fields_required(false);
+            dialog.set_df_property('gst_hsn_code', 'hidden', 1);
             dialog.set_df_property('filtered_item_code', 'placeholder', 'Type to search item code/name/description');
 
             const $list = append ? $wrap.find('.inline-item-list')
@@ -235,9 +230,7 @@ frappe.ui.form.on('Quotation', {
                         <div style="font-size:12px; color:#0b69ff;">Select</div>
                     </div>
                 `);
-                $row.on('click', () => {
-                    open_qty_and_add(code);
-                });
+                $row.on('click', () => open_qty_and_add(code));
                 $list.append($row);
             });
 
@@ -247,6 +240,8 @@ frappe.ui.form.on('Quotation', {
                 $more.find('button').on('click', () => fetch_and_render(true));
                 $wrap.append($more);
             }
+
+            if (filteredCtrl && filteredCtrl.$input) filteredCtrl.$input.val(currentTyped);
         }
 
         function fetch_and_render(append=false) {
@@ -285,43 +280,35 @@ frappe.ui.form.on('Quotation', {
         // Initial fetch
         fetch_and_render(false);
 
-        // ✅ Re-fetch on filter change
         (function bindFilterWatchers() {
-            // For Link fields and misc filters -> live update
-            const live = ['custom_part_type','custom_designs','custom_materials','customer_product_code'];
-            // For numeric dimensions -> only on blur/commit (prevents refetch on each digit)
+            const linkFields = ['custom_part_type','custom_designs','custom_materials','customer_product_code','gst_hsn_code'];
             const dims = ['custom_w','custom_d','custom_h','custom_t'];
 
-            function bindLive(fieldname) {
+            function refetch() { page_start = 0; fetch_and_render(false); }
+
+            function bindLink(fieldname) {
                 const ctrl = dialog.fields_dict[fieldname];
                 if (!ctrl || !ctrl.$input) return;
-                const handler = () => { page_start = 0; fetch_and_render(false); };
-                ctrl.$input.on('input change blur', handler);
-                ctrl.$input.on('awesomplete-selectcomplete awesomplete-close', handler);
-                try { ctrl.$input.on('select2:select', handler); } catch (e) {}
+                ctrl.$input.on('change blur', refetch);
+                ctrl.$input.on('awesomplete-selectcomplete awesomplete-close', refetch);
+                try { ctrl.$input.on('select2:select', refetch); } catch (e) {}
             }
-            function bindDims(fieldname) {
+            function bindDim(fieldname) {
                 const ctrl = dialog.fields_dict[fieldname];
                 if (!ctrl || !ctrl.$input) return;
-                const handler = () => { page_start = 0; fetch_and_render(false); };
-                ctrl.$input.on('change blur', handler); // not on input
+                ctrl.$input.on('change blur', refetch);
             }
 
-            live.forEach(bindLive);
-            dims.forEach(bindDims);
+            linkFields.forEach(bindLink);
+            dims.forEach(bindDim);
         })();
 
-        // Search typing (debounced) — disabled in createMode so you can type description
         (function hookSearchTyping(){
             const f = dialog.fields_dict.filtered_item_code;
             if (!f || !f.$input) return;
-
             let t;
             const onType = () => {
-                if (createMode) { // let the user type freely
-                    searchText = (f.$input.val() || '').trim();
-                    return;
-                }
+                if (createMode) { searchText = (f.$input.val() || '').trim(); return; }
                 clearTimeout(t);
                 t = setTimeout(() => {
                     searchText = (f.$input.val() || '').trim();
@@ -332,7 +319,6 @@ frappe.ui.form.on('Quotation', {
             f.$input.on('change', onType);
         })();
 
-        // ---------- Qty popup + add ----------
         function open_qty_and_add(picked) {
             const qty_dialog = new frappe.ui.Dialog({
                 title: 'Set Quantity',
@@ -340,63 +326,38 @@ frappe.ui.form.on('Quotation', {
                 primary_action_label: 'Add Item',
                 async primary_action(values) {
                     const qty = flt(values.qty);
-                    if (!qty || qty <= 0) {
-                        frappe.msgprint(__('Please enter a valid quantity.'));
-                        return;
-                    }
+                    if (!qty || qty <= 0) return frappe.msgprint(__('Please enter a valid quantity.'));
                     const r = await frappe.db.get_value('Item', picked, ['item_code', 'name', 'custom_part_type']);
                     const it = r && r.message ? r.message : null;
-                    if (!it) {
-                        frappe.msgprint(__('Unable to fetch Item. Please try again.'));
-                        return;
-                    }
+                    if (!it) return frappe.msgprint(__('Unable to fetch Item. Please try again.'));
                     dialog.set_value('custom_part_type', it.custom_part_type || '');
-
-                    add_item_to_child(
-                        { item_code: it.item_code || it.name, name: it.name },
-                        qty,
-                        dialog.get_values(true) || {}
-                    );
-                    qty_dialog.hide();
-                    dialog.hide();
+                    add_item_to_child({ item_code: it.item_code || it.name, name: it.name }, qty, dialog.get_values(true) || {});
+                    qty_dialog.hide(); dialog.hide();
                 }
             });
             const $qw = qty_dialog.$wrapper;
-            if (typeof $qw.modal === 'function') {
-                $qw.modal({ backdrop: 'static', keyboard: false });
-            }
+            if (typeof $qw.modal === 'function') $qw.modal({ backdrop: 'static', keyboard: false });
             qty_dialog.show();
         }
 
-        // ---------- Add row + toast ----------
         function add_item_to_child(item, qty, v) {
             v = v || {};
             const row = frm.add_child('items');
-
             frappe.model.set_value(row.doctype, row.name, 'item_code', item.item_code || item.name);
             frappe.model.set_value(row.doctype, row.name, 'qty', qty);
-
             frappe.model.set_value(row.doctype, row.name, 'custom_designs', v.custom_designs || '');
             frappe.model.set_value(row.doctype, row.name, 'custom_design', v.custom_designs || '');
             frappe.model.set_value(row.doctype, row.name, 'custom_materials', v.custom_materials || '');
-
             frappe.model.set_value(row.doctype, row.name, 'custom_w', (v.custom_w === 0) ? 0 : (v.custom_w || 0));
             frappe.model.set_value(row.doctype, row.name, 'custom_d', (v.custom_d === 0) ? 0 : (v.custom_d || 0));
             frappe.model.set_value(row.doctype, row.name, 'custom_h', (v.custom_h === 0) ? 0 : (v.custom_h || 0));
             frappe.model.set_value(row.doctype, row.name, 'custom_t', (v.custom_t === 0) ? 0 : (v.custom_t || 0));
-
             frappe.model.set_value(row.doctype, row.name, 'custom_customer_product_code', v.customer_product_code || '');
-
             frm.refresh_field('items');
-
-            frappe.show_alert({
-                message: `✅ Added <b>${frappe.utils.escape_html(item.item_code || item.name)}</b> (${qty})`,
-                indicator: 'green'
-            }, 5);
+            frappe.show_alert({ message: `✅ Added <b>${frappe.utils.escape_html(item.item_code || item.name)}</b> (${qty})`, indicator: 'green' }, 5);
         }
     },
 
-    // Footer button (kept)
     refresh(frm) {
         function add_button_once() {
             if (!frm.fields_dict || !frm.fields_dict.items) return;
@@ -407,21 +368,12 @@ frappe.ui.form.on('Quotation', {
             if (!$footer.length) return;
 
             const $afterBtn =
-                $footer.find('.btn').filter(function () {
-                    return $(this).text().trim().toLowerCase() === 'add multiple';
-                }).first().length
-                    ? $footer.find('.btn').filter(function () {
-                        return $(this).text().trim().toLowerCase() === 'add multiple';
-                    }).first()
-                    : $footer.find('.btn').filter(function () {
-                        return $(this).text().trim().toLowerCase() === 'add row';
-                    }).first();
+                $footer.find('.btn').filter(function(){ return $(this).text().trim().toLowerCase()==='add multiple'; }).first().length
+                ? $footer.find('.btn').filter(function(){ return $(this).text().trim().toLowerCase()==='add multiple'; }).first()
+                : $footer.find('.btn').filter(function(){ return $(this).text().trim().toLowerCase()==='add row'; }).first();
 
             const $btn = $('<button class="btn btn-default btn-xs btn-add-item-custom" style="margin-left:6px;">Add Item</button>');
-            $btn.on('click', function (e) {
-                e.preventDefault();
-                frm.trigger('custom_add_item');
-            });
+            $btn.on('click', function (e) { e.preventDefault(); frm.trigger('custom_add_item'); });
 
             if ($afterBtn && $afterBtn.length) $btn.insertAfter($afterBtn);
             else $footer.append($btn);
@@ -429,14 +381,10 @@ frappe.ui.form.on('Quotation', {
 
         add_button_once();
 
-        // hide native add buttons
         const hide_native_adds = () => {
             const $footer = frm.fields_dict.items.$wrapper.find('.grid-footer');
             $footer.find('.grid-add-row, .grid-add-multiple-rows').hide();
-            $footer.find('.btn').filter(function () {
-                const t = $(this).text().trim().toLowerCase();
-                return t === 'add row' || t === 'add multiple';
-            }).hide();
+            $footer.find('.btn').filter(function(){ const t=$(this).text().trim().toLowerCase(); return t==='add row'||t==='add multiple'; }).hide();
         };
         hide_native_adds();
 
@@ -444,18 +392,13 @@ frappe.ui.form.on('Quotation', {
             const original = frm.fields_dict.items.grid.on_grid_rendered;
             frm.fields_dict.items.grid.on_grid_rendered = function() {
                 if (typeof original === 'function') original.apply(this, arguments);
-                add_button_once();
-                hide_native_adds();
+                add_button_once(); hide_native_adds();
             };
         }
-        setTimeout(() => {
-            add_button_once();
-            hide_native_adds();
-        }, 300);
+        setTimeout(() => { add_button_once(); hide_native_adds(); }, 300);
     }
 });
 
-// --- helper: bottom-right toasts ---
 function ensureToastBottomRight() {
     if (document.getElementById('toast-bottom-right-style')) return;
     const css = `
