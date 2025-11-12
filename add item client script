@@ -185,7 +185,6 @@ frappe.ui.form.on('Quotation', {
                     dialog.set_df_property('filtered_item_code', 'placeholder', 'Enter description for the new Custom Item');
 
                     const $empty = $('<div style="color:#888;margin-top:6px;">No items found.</div>');
-                    // ⬇️ bottom-right button only (no helper text)
                     const $btnWrap = $(`
                         <div style="margin-top:8px; display:flex; justify-content:flex-end;">
                             <button class="btn btn-primary btn-sm btn-create-custom-item">Create Custom Item</button>
@@ -340,9 +339,26 @@ frappe.ui.form.on('Quotation', {
             qty_dialog.show();
         }
 
+        // Helper: find first empty (no item_code) child row
+        function find_first_empty_row() {
+            if (!frm.doc.items || !frm.doc.items.length) return null;
+            for (let i = 0; i < frm.doc.items.length; i++) {
+                const r = frm.doc.items[i];
+                if (!r.item_code && !r.item_name && !r.qty) {
+                    return r;
+                }
+            }
+            return null;
+        }
+
         function add_item_to_child(item, qty, v) {
             v = v || {};
-            const row = frm.add_child('items');
+            // Try to reuse the first empty row if present
+            let row = find_first_empty_row();
+            if (!row) {
+                row = frm.add_child('items');
+            }
+            // Set values on the found/created row
             frappe.model.set_value(row.doctype, row.name, 'item_code', item.item_code || item.name);
             frappe.model.set_value(row.doctype, row.name, 'qty', qty);
             frappe.model.set_value(row.doctype, row.name, 'custom_designs', v.custom_designs || '');
@@ -379,23 +395,46 @@ frappe.ui.form.on('Quotation', {
             else $footer.append($btn);
         }
 
-        add_button_once();
+        // --- Observer-powered hider for native Add buttons ---
+        function hide_native_adds(frm) {
+            const $wrapper = frm.fields_dict.items.$wrapper;
+            const $footer  = $wrapper.find('.grid-footer');
 
-        const hide_native_adds = () => {
-            const $footer = frm.fields_dict.items.$wrapper.find('.grid-footer');
-            $footer.find('.grid-add-row, .grid-add-multiple-rows').hide();
-            $footer.find('.btn').filter(function(){ const t=$(this).text().trim().toLowerCase(); return t==='add row'||t==='add multiple'; }).hide();
-        };
-        hide_native_adds();
+            const doHide = () => {
+                $footer.find('.grid-add-row, .grid-add-multiple-rows').hide();
+                $footer.find('.btn').filter(function () {
+                    const t = $(this).text().trim().toLowerCase();
+                    return t === 'add row' || t === 'add multiple';
+                }).hide();
+            };
+
+            // Hide now
+            doHide();
+
+            // Re-hide on any mutation (buttons re-injected before save, etc.)
+            if ($footer.length && !$footer.data('hide-add-observer')) {
+                const obs = new MutationObserver(() => doHide());
+                obs.observe($footer.get(0), { childList: true, subtree: true, attributes: true });
+                $footer.data('hide-add-observer', obs);
+            }
+        }
+
+        add_button_once();
+        hide_native_adds(frm);
 
         if (frm.fields_dict.items && frm.fields_dict.items.grid) {
             const original = frm.fields_dict.items.grid.on_grid_rendered;
             frm.fields_dict.items.grid.on_grid_rendered = function() {
                 if (typeof original === 'function') original.apply(this, arguments);
-                add_button_once(); hide_native_adds();
+                add_button_once();
+                hide_native_adds(frm);   // always hide after grid render
             };
         }
-        setTimeout(() => { add_button_once(); hide_native_adds(); }, 300);
+
+        setTimeout(() => {
+            add_button_once();
+            hide_native_adds(frm);       // extra safety after async renders
+        }, 300);
     }
 });
 
